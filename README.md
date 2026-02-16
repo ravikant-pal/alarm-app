@@ -1,70 +1,214 @@
-# Getting Started with Create React App
+# Guaranteed Alarm POC — Step-by-Step Setup
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## CRA + Bubblewrap TWA + No Backend Services
 
-## Available Scripts
+### How it works
 
-In the project directory, you can run:
+```
+User sets alarm (React UI)
+        │
+        ├─ window.NativeAlarm.scheduleAlarm()  ──► Android AlarmManager.setExactAndAllowWhileIdle()
+        │                                              ✅ Fires in Doze mode
+        │                                              ✅ Survives app closure
+        │
+        └─ Notification Triggers API           ──► TimestampTrigger (Chrome-level)
+                                                      ✅ Browser fallback
+                                                      ✅ No backend needed
 
-### `npm start`
+Both use the SAME notification tag → Android deduplicates → user sees ONE notification
+```
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+---
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Part 1 — CRA Web App Setup
 
-### `npm test`
+### Step 1: Create the CRA app
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+```bash
+npx create-react-app alarm-app
+cd alarm-app
+```
 
-### `npm run build`
+### Step 2: Copy web source files
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Copy these files from the POC into `src/`:
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+- `App.js`
+- `App.css`
+- `alarmService.js`
+- `service-worker-custom.js` → copy to `public/service-worker-custom.js`
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### Step 3: Register the custom service worker
 
-### `npm run eject`
+In `src/index.js`, add after the ReactDOM.render call:
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+```js
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker-custom.js').then((reg) => {
+    console.log('Custom SW registered:', reg.scope);
+  });
+}
+```
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+### Step 4: Test in browser first
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+```bash
+npm start
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+Open `http://localhost:3000` in Chrome on Android or desktop Chrome.
 
-## Learn More
+- Set an alarm a few minutes ahead
+- The "Bridge Status" panel shows which arms are available
+- If Notification Triggers API is supported, you'll see a scheduled notification
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+---
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Part 2 — Android (Bubblewrap) Setup
 
-### Code Splitting
+### Step 1: Install Bubblewrap CLI
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+```bash
+npm install -g @bubblewrap/cli
+```
 
-### Analyzing the Bundle Size
+### Step 2: Initialize TWA project
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+```bash
+mkdir my-twa && cd my-twa
+bubblewrap init --manifest https://YOUR_DOMAIN/.well-known/assetlinks.json
+```
 
-### Making a Progressive Web App
+Follow the prompts. This generates a full Android Studio project.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+### Step 3: Open in Android Studio
 
-### Advanced Configuration
+```bash
+bubblewrap open
+# OR: open Android Studio → Open → select the generated folder
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+### Step 4: Add the Kotlin files
 
-### Deployment
+Copy these files into `app/src/main/java/YOUR_PACKAGE/`:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+- `AlarmBridge.kt` — update package name at top
+- `AlarmReceiver.kt` — update package name at top
+- `MainActivityWebView.kt` — update package name + `APP_URL` constant
 
-### `npm run build` fails to minify
+### Step 5: Update AndroidManifest.xml
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Merge the permissions and receiver declarations from `AndroidManifest.xml`
+into your Bubblewrap-generated manifest.
+
+**Critical permissions to add:**
+
+```xml
+<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+```
+
+### Step 6: Set the correct APP_URL
+
+In `MainActivityWebView.kt`, update:
+
+```kotlin
+// Local dev (Android emulator):
+private val APP_URL = "http://10.0.2.2:3000"
+
+// Production:
+private val APP_URL = "https://yourdomain.com"
+```
+
+### Step 7: Make MainActivityWebView your launcher
+
+In `AndroidManifest.xml`, ensure `MainActivityWebView` has the LAUNCHER intent filter
+(remove it from the original Bubblewrap LauncherActivity if present).
+
+### Step 8: Build and run
+
+```bash
+# Via Android Studio: Run → Run 'app'
+# OR via Bubblewrap:
+bubblewrap build
+bubblewrap install
+```
+
+### Step 9: Grant alarm permission on Android 12+
+
+On first launch, the app will open the system screen asking for
+"Allow setting alarms and reminders". Grant it.
+
+---
+
+## Part 3 — Testing the Full Hybrid Flow
+
+1. Run `npm start` in your CRA project (or deploy to a server)
+2. Run the Android app on a physical device or emulator
+3. Set an alarm 2 minutes ahead
+4. Check the "Bridge Status" panel:
+   - `Native AlarmManager: ✅ Available` — native bridge is working
+   - `Notification Triggers: ✅ Available` — web fallback also armed
+5. Lock the screen and wait
+6. Both arms fire → Android deduplicates by notification tag → ONE notification appears
+
+---
+
+## Part 4 — Using This for Cron Jobs (Future Step)
+
+Once the alarm POC works, you can use the same bridge for cron-style scheduling:
+
+```js
+// In alarmService.js, add a cron scheduler:
+export async function scheduleCron(id, cronExpression, label) {
+  const nextRun = getNextCronTimestamp(cronExpression); // use cronstrue or cron-parser
+  await scheduleAlarm({ id, label, timestamp: nextRun, timeString: '...' });
+}
+```
+
+And in `AlarmReceiver.kt`, after showing the notification, re-register the next occurrence:
+
+```kotlin
+// After showing the notification in AlarmReceiver:
+val prefs = context.getSharedPreferences("crons", Context.MODE_PRIVATE)
+val cronExpr = prefs.getString("cron_$alarmId", null)
+if (cronExpr != null) {
+    val nextTimestamp = CronParser.getNextTimestamp(cronExpr)
+    AlarmBridge(context).scheduleAlarm(alarmId, nextTimestamp, alarmLabel)
+}
+```
+
+---
+
+## Quick File Reference
+
+| File                       | Location       | Purpose                             |
+| -------------------------- | -------------- | ----------------------------------- |
+| `App.js`                   | `src/`         | React UI                            |
+| `App.css`                  | `src/`         | Styles                              |
+| `alarmService.js`          | `src/`         | Hybrid alarm scheduler              |
+| `service-worker-custom.js` | `public/`      | SW notification handler             |
+| `AlarmBridge.kt`           | `android/.../` | Native bridge (JS interface)        |
+| `AlarmReceiver.kt`         | `android/.../` | BroadcastReceiver for alarm fire    |
+| `MainActivityWebView.kt`   | `android/.../` | WebView activity (registers bridge) |
+| `AndroidManifest.xml`      | `android/.../` | Permissions + receiver declarations |
+
+---
+
+## Common Issues
+
+**"Native AlarmManager: ❌ Not Available"**
+→ You're testing in a regular browser, not the Android WebView. That's fine — web fallback still works.
+
+**Notification permission denied**
+→ `alarmService.js` calls `Notification.requestPermission()` automatically. Make sure you don't block it.
+
+**Alarm doesn't fire on locked screen**
+→ Check battery optimization: Settings → Apps → YOUR_APP → Battery → Unrestricted
+
+**Android 12+ permission screen doesn't open**
+→ `canScheduleExactAlarms()` check is in `MainActivityWebView.onCreate()`. Verify the Activity is running.
+
+**Duplicate notifications**
+→ The native `AlarmReceiver` uses `alarmId.hashCode()` as notification ID. The web notification uses `tag: alarmId`. These need to match — which they do by default in this POC.
