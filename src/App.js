@@ -13,12 +13,11 @@ function App() {
   const [labelInput, setLabelInput] = useState('');
   const [status, setStatus] = useState('');
 
-  // Load saved alarms on mount + re-arm setTimeout for any pending alarms
   useEffect(() => {
     (async () => {
       const saved = await loadAlarms();
       setAlarms(saved);
-      rearmTimeouts(saved); // Re-arm Arm 3 after page refresh
+      rearmTimeouts(saved);
     })();
   }, []);
 
@@ -31,11 +30,7 @@ function App() {
     const [hours, minutes] = timeInput.split(':').map(Number);
     const target = new Date();
     target.setHours(hours, minutes, 0, 0);
-
-    // If time already passed today, schedule for tomorrow
-    if (target.getTime() <= Date.now()) {
-      target.setDate(target.getDate() + 1);
-    }
+    if (target.getTime() <= Date.now()) target.setDate(target.getDate() + 1);
 
     const alarm = {
       id: 'alarm_' + Date.now(),
@@ -46,8 +41,7 @@ function App() {
 
     try {
       await scheduleAlarm(alarm);
-      const updated = await loadAlarms();
-      setAlarms(updated);
+      setAlarms(await loadAlarms());
       setTimeInput('');
       setLabelInput('');
       setStatus(
@@ -61,22 +55,23 @@ function App() {
 
   const handleCancel = async (id) => {
     await cancelAlarm(id);
-    const updated = await loadAlarms();
-    setAlarms(updated);
+    setAlarms(await loadAlarms());
     setStatus('🗑️ Alarm cancelled');
   };
 
-  const hasNative = !!window.NativeAlarm;
-  const hasTriggers =
+  const isNative = !!window.NativeAlarm;
+  const isTriggers =
     'showTrigger' in Notification.prototype && !!window.TimestampTrigger;
-  const hasTimeout = !hasNative; // Arm 3 is only active in browser (no native)
+  const isTimeout = !isNative;
+
+  // Detect mobile browser for the hint message
+  const isMobileBrowser =
+    /Android|iPhone|iPad/i.test(navigator.userAgent) && !isNative;
 
   return (
     <div className='container'>
       <h1>⏰ Alarm POC</h1>
-      <p className='subtitle'>
-        Hybrid: Native AlarmManager + Notification Triggers + setTimeout
-      </p>
+      <p className='subtitle'>Hybrid: Native AlarmManager + SW Notifications</p>
 
       <div className='card'>
         <h2>Set Alarm</h2>
@@ -123,30 +118,40 @@ function App() {
 
       <div className='debug-card'>
         <h3>🔍 Bridge Status</h3>
+
         <p>
           Arm 1 — Native AlarmManager:{' '}
           <strong>
-            {hasNative ? '✅ Available' : '❌ Browser only (expected)'}
+            {isNative ? '✅ Available' : '❌ Browser only (expected until TWA)'}
           </strong>
         </p>
+
         <p>
           Arm 2 — Notification Triggers:{' '}
           <strong>
-            {hasTriggers
-              ? '✅ Available (Chrome Android)'
-              : '❌ Not supported on desktop'}
+            {isTriggers
+              ? '✅ Available'
+              : '❌ Not available (Origin Trial ended — Chrome never shipped to stable)'}
           </strong>
         </p>
+
         <p>
-          Arm 3 — setTimeout Fallback:{' '}
+          Arm 3 — setTimeout + SW:{' '}
           <strong>
-            {hasTimeout
-              ? '✅ Active (browser dev mode)'
-              : '⏭️ Skipped (native available)'}
+            {isTimeout ? '✅ Active' : '⏭️ Skipped (Arm 1 handles it)'}
           </strong>
         </p>
-        {hasTimeout && (
-          <p className='warn-note'>⚠️ Arm 3 requires tab to stay open</p>
+
+        {isMobileBrowser && (
+          <p className='warn-note'>
+            ⚠️ Mobile browser: keep the tab open for Arm 3 to fire.
+            Notifications use Service Worker to work on Android Chrome.
+          </p>
+        )}
+        {isTimeout && !isMobileBrowser && (
+          <p className='warn-note'>
+            ⚠️ Desktop: keep the tab open for Arm 3 to fire.
+          </p>
         )}
       </div>
     </div>

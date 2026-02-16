@@ -1,9 +1,9 @@
 // alarmService.js
 // Hybrid alarm scheduler — 3 arms, no backend required.
 //
-//  Arm 1 — Native AlarmManager  (Android WebView via Kotlin bridge, guaranteed)
-//  Arm 2 — Notification Triggers (Chrome Android, survives tab close)
-//  Arm 3 — setTimeout            (desktop Chrome dev fallback, tab must stay open)
+//  Arm 1 — Native AlarmManager   (Android WebView via Kotlin bridge — guaranteed)
+//  Arm 2 — Notification Triggers (Origin Trial — ended, kept as future-proof check)
+//  Arm 3 — setTimeout + SW notif (all browsers — tab must stay open)
 
 const DB_NAME = 'AlarmDB';
 const DB_VERSION = 1;
@@ -61,7 +61,7 @@ async function ensureNotificationPermission() {
   return result === 'granted';
 }
 
-// ─── Arm 1: Native AlarmManager bridge (guaranteed, Android only) ─────────────
+// ─── Arm 1: Native AlarmManager bridge (Android WebView only) ────────────────
 
 function scheduleNative(alarm) {
   if (!window.NativeAlarm) return false;
@@ -85,32 +85,25 @@ function cancelNative(id) {
   }
 }
 
-// ─── Arm 2: Notification Triggers API (Chrome Android) ───────────────────────
-// NOTE: TimestampTrigger is accessible via the chrome flag on desktop, but
-// does NOT actually fire on desktop Chrome — only on Chrome Android.
+// ─── Arm 2: Notification Triggers API ────────────────────────────────────────
+// NOTE: This was a Chrome Origin Trial (ended). Kept here as a future-proof
+// check — if Chrome ever ships it to stable this will activate automatically.
 
 async function scheduleWebTrigger(alarm) {
   if (!('showTrigger' in Notification.prototype) || !window.TimestampTrigger) {
-    console.warn(
-      '[AlarmService] Arm 2: Notification Triggers API not supported'
-    );
+    console.warn('[AlarmService] Arm 2: Notification Triggers not available');
     return false;
   }
 
   const reg = await navigator.serviceWorker.getRegistration();
-  if (!reg) {
-    console.warn('[AlarmService] Arm 2: No service worker registration found');
-    return false;
-  }
-
-  const trigger = new window.TimestampTrigger(alarm.timestamp);
+  if (!reg) return false;
 
   await reg.showNotification(alarm.label, {
     tag: alarm.id,
     body: 'Alarm: ' + alarm.label,
     icon: '/logo192.png',
     badge: '/logo192.png',
-    showTrigger: trigger,
+    showTrigger: new window.TimestampTrigger(alarm.timestamp),
     renotify: false,
     requireInteraction: true,
     data: { alarmId: alarm.id },
@@ -131,32 +124,28 @@ async function cancelWebTrigger(id) {
     includeTriggered: true,
   });
   pending.forEach((n) => n.close());
-  console.log(
-    '[AlarmService] Arm 2 cancelled:',
-    id,
-    '(' + pending.length + ' removed)'
-  );
 }
 
-// ─── Arm 3: setTimeout fallback (desktop browser dev only) ───────────────────
-// TimestampTrigger does NOT fire on desktop Chrome even with the flag enabled.
-// This arm fires a Notification directly so you can test the full flow locally.
-// Limitation: the tab must remain open. Auto-skipped when native bridge exists.
+// ─── Arm 3: setTimeout + Service Worker notification ─────────────────────────
+// KEY FIX: Mobile Chrome blocks `new Notification()` constructor entirely.
+// All notifications on mobile MUST go through ServiceWorkerRegistration.showNotification().
+// This arm uses setTimeout to wait for the alarm time, then fires via SW.
+// Limitation: tab must remain open (acceptable for browser testing before TWA build).
 
-const _timeouts = new Map(); // alarmId → timeoutHandle
+const _timeouts = new Map();
 
 function scheduleTimeout(alarm) {
-  if (window.NativeAlarm) return false; // native available, skip this arm
+  if (window.NativeAlarm) return false; // native handles it
 
   const delay = alarm.timestamp - Date.now();
   if (delay <= 0) {
-    console.warn('[AlarmService] Arm 3: timestamp already passed, skipping');
+    console.warn('[AlarmService] Arm 3: timestamp already passed');
     return false;
   }
 
-  const handle = setTimeout(() => {
+  const handle = setTimeout(async () => {
     _timeouts.delete(alarm.id);
-    _fireDesktopNotification(alarm);
+    await _fireSwNotification(alarm);
   }, delay);
 
   _timeouts.set(alarm.id, handle);
@@ -176,27 +165,47 @@ function cancelTimeout(id) {
   }
 }
 
-function _fireDesktopNotification(alarm) {
+async function _fireSwNotification(alarm) {
   if (Notification.permission !== 'granted') return;
-  const n = new Notification('⏰ ' + alarm.label, {
-    body: 'Your alarm is ringing',
-    icon: '/logo192.png',
-    tag: alarm.id,
-    requireInteraction: true,
-  });
-  n.onclick = () => {
-    n.close();
-    window.focus();
-  };
-  console.log('[AlarmService] Arm 3 fired notification for:', alarm.id);
+
+  // Always prefer SW-based notification — works on BOTH mobile and desktop Chrome.
+  // `new Notification()` is blocked on mobile Chrome (requires SW on Android).
+  const reg = await navigator.serviceWorker.getRegistration();
+
+  if (reg) {
+    await reg.showNotification('⏰ ' + alarm.label, {
+      body: 'Your alarm is ringing',
+      icon: '/logo192.png',
+      tag: alarm.id,
+      requireInteraction: true,
+      data: { alarmId: alarm.id },
+    });
+    console.log('[AlarmService] Arm 3 fired via SW notification:', alarm.id);
+  } else {
+    // Last-resort fallback for desktop browsers without SW (very rare)
+    const n = new Notification('⏰ ' + alarm.label, {
+      body: 'Your alarm is ringing',
+      icon: '/logo192.png',
+      tag: alarm.id,
+      requireInteraction: true,
+    });
+    n.onclick = () => {
+      n.close();
+      window.focus();
+    };
+    console.log(
+      '[AlarmService] Arm 3 fired via direct Notification:',
+      alarm.id
+    );
+  }
 }
 
 /**
  * Re-arm Arm 3 setTimeout after a page refresh.
- * Call once on app mount with the full saved alarms list from IndexedDB.
+ * Call once on mount with the saved alarms list from IndexedDB.
  */
 export function rearmTimeouts(alarms) {
-  if (window.NativeAlarm) return; // not needed when native is available
+  if (window.NativeAlarm) return;
   const future = alarms.filter((a) => a.timeoutOk && a.timestamp > Date.now());
   future.forEach((alarm) => scheduleTimeout(alarm));
   if (future.length > 0) {
@@ -208,9 +217,6 @@ export function rearmTimeouts(alarms) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Schedule an alarm across all available arms.
- */
 export async function scheduleAlarm(alarm) {
   const hasPermission = await ensureNotificationPermission();
   if (!hasPermission) {
@@ -225,7 +231,7 @@ export async function scheduleAlarm(alarm) {
 
   if (!nativeOk && !webOk && !timeoutOk) {
     throw new Error(
-      'No alarm arm is available. Make sure notifications are allowed.'
+      'No alarm arm available. Make sure notifications are allowed.'
     );
   }
 
@@ -237,9 +243,6 @@ export async function scheduleAlarm(alarm) {
   });
 }
 
-/**
- * Cancel a scheduled alarm across all arms.
- */
 export async function cancelAlarm(id) {
   cancelNative(id);
   await cancelWebTrigger(id);
